@@ -1,0 +1,926 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Platform Fighter - Spectator Mode Update</title>
+    <style>
+        * { box-sizing: border-box; user-select: none; }
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #111;
+            color: #fff;
+            font-family: 'Helvetica Neue', Arial, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            overflow: hidden;
+        }
+        #game-container {
+            position: relative;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        canvas {
+            display: block;
+            background: #000;
+        }
+        #audio-notice {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: rgba(0,0,0,0.7);
+            padding: 5px 10px;
+            border-radius: 4px;
+            font-size: 12px;
+            pointer-events: none;
+            transition: opacity 0.5s;
+        }
+    </style>
+</head>
+<body>
+
+<div id="game-container">
+    <div id="audio-notice">画面内をクリックするとサウンドが有効になります</div>
+    <canvas id="gameCanvas" width="960" height="540"></canvas>
+</div>
+
+<script>
+// ==========================================
+// 1. 定数・設定
+// ==========================================
+const CANVAS_WIDTH = 960;
+const CANVAS_HEIGHT = 540;
+
+const PHYSICS = {
+    gravity: 0.5,
+    friction: 0.85,
+    airResistance: 0.98,
+    dashSpeed: 6,
+    walkSpeed: 3.5,
+    jumpForce: -12,
+    doubleJumpForce: -10,
+    maxFallSpeed: 15
+};
+
+const STAGE = {
+    main: { x: 180, y: 390, w: 600, h: 40, color: '#4a3525', topColor: '#557a2b' },
+    platforms: [
+        { x: 220, y: 290, w: 110, h: 10, color: '#8b7355' }, 
+        { x: 630, y: 290, w: 110, h: 10, color: '#8b7355' }, 
+        { x: 425, y: 190, w: 110, h: 10, color: '#8b7355' }  
+    ],
+    bounds: { left: -100, right: CANVAS_WIDTH + 100, top: -100, bottom: CANVAS_HEIGHT + 100 }
+};
+
+// 難易度ごとのAIパラメータ設定
+const DIFFICULTY_SETTINGS = {
+    easy:    { reactionInterval: 24, attackChance: 0.2, speedMultiplier: 0.5, shootChance: 0.2 },
+    normal:  { reactionInterval: 12, attackChance: 0.4, speedMultiplier: 0.65, shootChance: 0.5 },
+    hard:    { reactionInterval: 6,  attackChance: 0.6, speedMultiplier: 0.85, shootChance: 0.7 },
+    lunatic: { reactionInterval: 2,  attackChance: 0.9, speedMultiplier: 1.1,  shootChance: 0.9 }
+};
+
+// ==========================================
+// 2. オーディオシステム
+// ==========================================
+const AudioSys = {
+    ctx: null,
+    bgmNode: null,
+    bgmEnabled: true,
+
+    init() {
+        if (this.ctx) return;
+        this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+        document.getElementById('audio-notice').style.opacity = '0';
+        if (this.bgmEnabled) this.startBGM();
+    },
+
+    playTone(freq, type, duration, vol, endFreq = freq) {
+        if (!this.ctx) return;
+        try {
+            let osc = this.ctx.createOscillator();
+            let gain = this.ctx.createGain();
+            osc.type = type;
+            osc.frequency.setValueAtTime(freq, this.ctx.currentTime);
+            if (endFreq !== freq) {
+                osc.frequency.exponentialRampToValueAtTime(endFreq, this.ctx.currentTime + duration);
+            }
+            gain.gain.setValueAtTime(vol, this.ctx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.001, this.ctx.currentTime + duration);
+            osc.connect(gain);
+            gain.connect(this.ctx.destination);
+            osc.start();
+            osc.stop(this.ctx.currentTime + duration);
+        } catch(e) {}
+    },
+
+    playJump() { this.playTone(150, 'triangle', 0.15, 0.3, 400); },
+    playHit() { this.playTone(200, 'sawtooth', 0.1, 0.4, 60); },
+    playKO() { this.playTone(600, 'sawtooth', 0.5, 0.5, 80); },
+    playShoot() { this.playTone(400, 'triangle', 0.12, 0.2, 800); },
+    playSelect() { this.playTone(330, 'square', 0.08, 0.2); },
+    playDecide() { this.playTone(440, 'square', 0.15, 0.25, 660); },
+    playWin() {
+        setTimeout(() => this.playTone(300, 'square', 0.1, 0.3), 0);
+        setTimeout(() => this.playTone(400, 'square', 0.1, 0.3), 100);
+        setTimeout(() => this.playTone(500, 'square', 0.3, 0.4), 200);
+    },
+
+    startBGM() {
+        if (!this.ctx || this.bgmNode) return;
+        let tempo = 130; 
+        let seq = [261.63, 329.63, 392.00, 329.63, 293.66, 349.23, 440.00, 349.23]; 
+        let step = 0;
+        
+        setInterval(() => {
+            if (!this.bgmEnabled || !this.ctx) return;
+            if (game.gameState === 'home') return; 
+            if (game.gameState === 'gameover') return;
+            this.playTone(seq[step % seq.length] * 0.5, 'triangle', 0.22, 0.04);
+            step++;
+        }, 60000 / tempo);
+        this.bgmNode = true;
+    }
+};
+
+// ==========================================
+// 3. 入力処理
+// ==========================================
+const Keys = {
+    inputs: {},
+    pressed: {}, 
+    init() {
+        window.addEventListener('keydown', e => {
+            AudioSys.init();
+            
+            if (e.key === 'Escape') {
+                game.returnToHome();
+                return;
+            }
+
+            let key = e.key.toLowerCase();
+            
+            if (!this.inputs[key]) {
+                this.pressed[key] = true;
+            }
+            this.inputs[key] = true;
+            
+            if (key === 'w' && game.player && game.gameState === 'play' && !game.spectatorMode) {
+                game.player.jumpPressed();
+            }
+            
+            game.handleMenuInput(key);
+        });
+        window.addEventListener('keyup', e => {
+            let key = e.key.toLowerCase();
+            this.inputs[key] = false;
+            this.pressed[key] = false;
+        });
+    },
+    isDown(key) { 
+        return !!this.inputs[key]; 
+    },
+    isPressed(key) {
+        if (this.pressed[key]) {
+            this.pressed[key] = false;
+            return true;
+        }
+        return false;
+    }
+};
+
+// ==========================================
+// 4. キャラクタークラス
+// ==========================================
+class Character {
+    constructor(x, y, color, isCPU) {
+        this.startX = x;
+        this.startY = y;
+        this.reset();
+        this.color = color;
+        this.isCPU = isCPU;
+        this.w = 30;
+        this.h = 45;
+        
+        this.aiDecisionTimer = 0;
+        this.aiAction = 'idle';
+    }
+
+    reset() {
+        this.x = this.startX;
+        this.y = this.startY;
+        this.vx = 0;
+        this.vy = 0;
+        this.percentage = 0;
+        this.facing = 1; 
+        this.isGrounded = false;
+        this.jumpsLeft = 2;
+        this.attackCooldown = 0;
+        this.specialCooldown = 0; 
+        this.hitstun = 0;
+        this.isDashing = false;
+        this.isEvading = false;
+        this.evadeCooldown = 0;
+        this.animTimer = 0;
+        this.state = 'idle'; 
+    }
+
+    jumpPressed() {
+        if (this.hitstun > 0 || this.isEvading) return;
+        if (this.isGrounded) {
+            this.vy = PHYSICS.jumpForce;
+            this.isGrounded = false;
+            this.jumpsLeft--;
+            AudioSys.playJump();
+            game.addDust(this.x + this.w/2, this.y + this.h);
+        } else if (this.jumpsLeft > 0) {
+            this.vy = PHYSICS.doubleJumpForce;
+            this.jumpsLeft--;
+            AudioSys.playJump();
+            game.addDust(this.x + this.w/2, this.y + this.h);
+        }
+    }
+
+    attack() {
+        if (this.attackCooldown > 0 || this.hitstun > 0 || this.isEvading || this.specialCooldown > 10) return;
+        this.attackCooldown = 25;
+        this.state = 'attack';
+        
+        let attackW = 40;
+        let attackH = 35;
+        let attackX = this.facing === 1 ? this.x + this.w : this.x - attackW;
+        let attackY = this.y + 5;
+
+        game.addHitbox(attackX, attackY, attackW, attackH, this);
+    }
+
+    fireProjectile() {
+        if (this.specialCooldown > 0 || this.hitstun > 0 || this.isEvading || this.attackCooldown > 0) return;
+        this.specialCooldown = 50; 
+        this.state = 'attack';
+        
+        let pVx = this.facing * 7; 
+        let pX = this.facing === 1 ? this.x + this.w + 5 : this.x - 15;
+        let pY = this.y + this.h / 2 - 4;
+        
+        game.addProjectile(pX, pY, pVx, this);
+    }
+
+    evade() {
+        if (this.evadeCooldown > 0 || this.hitstun > 0 || this.isEvading) return;
+        this.isEvading = true;
+        this.evadeCooldown = 50;
+        setTimeout(() => this.isEvading = false, 200); 
+    }
+
+    update() {
+        this.animTimer++;
+        if (this.attackCooldown > 0) this.attackCooldown--;
+        if (this.specialCooldown > 0) this.specialCooldown--;
+        if (this.evadeCooldown > 0) this.evadeCooldown--;
+        
+        if (this.hitstun > 0) {
+            this.hitstun--;
+            this.state = 'hit';
+        } else if (this.attackCooldown > 10 || this.specialCooldown > 35) {
+            this.state = 'attack';
+        } else if (Math.abs(this.vx) > 0.5 && this.isGrounded) {
+            this.state = 'walk';
+        } else {
+            this.state = 'idle';
+        }
+
+        if (this.hitstun <= 0) {
+            if (this.isCPU) {
+                // ターゲットは自分の反対側のキャラクター
+                let target = (this === game.player) ? game.cpu : game.player;
+                this.updateAI(target);
+            } else {
+                this.updatePlayerControls();
+            }
+        }
+
+        if (!this.isGrounded) {
+            this.vy += PHYSICS.gravity;
+            if (this.vy > PHYSICS.maxFallSpeed) this.vy = PHYSICS.maxFallSpeed;
+            this.vx *= PHYSICS.airResistance;
+        } else {
+            this.vx *= PHYSICS.friction;
+        }
+
+        this.x += this.vx;
+        this.y += this.vy;
+
+        this.checkStageCollision();
+
+        if (this.x < STAGE.bounds.left || this.x > STAGE.bounds.right ||
+            this.y < STAGE.bounds.top || this.y > STAGE.bounds.bottom) {
+            game.triggerKO(this);
+        }
+    }
+
+    updatePlayerControls() {
+        this.isDashing = Keys.isDown('shift');
+        let speed = this.isDashing ? PHYSICS.dashSpeed : PHYSICS.walkSpeed;
+
+        if (Keys.isDown('a')) {
+            this.vx = -speed;
+            this.facing = -1;
+        } else if (Keys.isDown('d')) {
+            this.vx = speed;
+            this.facing = 1;
+        }
+
+        if (Keys.isPressed('j')) this.attack();
+        if (Keys.isPressed('k')) this.fireProjectile(); 
+        if (Keys.isDown('l')) this.evade();
+    }
+
+    updateAI(target) {
+        if (!target) return;
+
+        let aiConfig = DIFFICULTY_SETTINGS[game.difficulty];
+        this.aiDecisionTimer++;
+        
+        let isOffstage = (this.x + this.w/2 < STAGE.main.x || this.x + this.w/2 > STAGE.main.x + STAGE.main.w);
+        if (isOffstage && this.y > STAGE.main.y - 60) {
+            let stageCenter = STAGE.main.x + STAGE.main.w/2;
+            this.vx = (this.x + this.w/2 < stageCenter) ? PHYSICS.walkSpeed * 0.8 : -PHYSICS.walkSpeed * 0.8;
+            this.facing = this.vx > 0 ? 1 : -1;
+            if (this.vy > 1 && Math.random() < 0.2) {
+                this.jumpPressed();
+            }
+            return;
+        }
+
+        if (this.aiDecisionTimer % aiConfig.reactionInterval === 0) {
+            let diffX = (target.x + target.w/2) - (this.x + this.w/2);
+            let diffY = (target.y + target.h/2) - (this.y + this.h/2);
+            let dist = Math.sqrt(diffX*diffX + diffY*diffY);
+
+            let rand = Math.random();
+
+            if (rand > aiConfig.attackChance + 0.3) {
+                this.aiAction = 'chill';
+            } else if (dist > 250) { 
+                this.aiAction = Math.random() < aiConfig.shootChance ? 'shoot' : 'approach';
+            } else if (dist < 70) {
+                this.aiAction = Math.random() < aiConfig.attackChance ? 'attack' : 'retreat';
+            } else {
+                this.aiAction = 'approach';
+            }
+
+            if (game.difficulty === 'lunatic' && dist < 80 && target.state === 'attack' && Math.random() < 0.5) {
+                this.evade();
+            }
+        }
+
+        let targetDiffX = (target.x + target.w/2) - (this.x + this.w/2);
+        let speed = PHYSICS.walkSpeed * aiConfig.speedMultiplier; 
+
+        if (this.aiAction === 'approach') {
+            this.vx = targetDiffX > 0 ? speed : -speed;
+            this.facing = targetDiffX > 0 ? 1 : -1;
+        } else if (this.aiAction === 'retreat') {
+            this.vx = targetDiffX > 0 ? -speed : speed;
+            this.facing = targetDiffX > 0 ? 1 : -1; 
+        } else if (this.aiAction === 'attack') {
+            this.attack();
+        } else if (this.aiAction === 'shoot') {
+            this.fireProjectile();
+        } else if (this.aiAction === 'chill') {
+            this.vx = 0; 
+        }
+
+        if (target.y < this.y - 70 && this.isGrounded && Math.random() < 0.05) {
+            this.jumpPressed();
+        }
+    }
+
+    checkStageCollision() {
+        let oldGrounded = this.isGrounded;
+        this.isGrounded = false;
+
+        if (this.vy >= 0) {
+            if (this.x + this.w > STAGE.main.x && this.x < STAGE.main.x + STAGE.main.w) {
+                if (this.y + this.h >= STAGE.main.y && this.y + this.h - this.vy <= STAGE.main.y + 12) {
+                    this.y = STAGE.main.y - this.h;
+                    this.vy = 0;
+                    this.isGrounded = true;
+                    this.jumpsLeft = 2;
+                }
+            }
+            STAGE.platforms.forEach(plat => {
+                if (this.x + this.w > plat.x && this.x < plat.x + plat.w) {
+                    if (this.y + this.h >= plat.y && this.y + this.h - this.vy <= plat.y + 10) {
+                        this.y = plat.y - this.h;
+                        this.vy = 0;
+                        this.isGrounded = true;
+                        this.jumpsLeft = 2;
+                    }
+                }
+            });
+        }
+
+        if (!oldGrounded && this.isGrounded) {
+            game.addDust(this.x + this.w/2, this.y + this.h);
+        }
+    }
+
+    draw(ctx) {
+        if (this.isEvading && Math.floor(this.animTimer / 3) % 2 === 0) return; 
+
+        ctx.save();
+        ctx.translate(this.x + this.w/2, this.y + this.h/2);
+        ctx.scale(this.facing, 1);
+
+        ctx.fillStyle = this.color;
+        if (this.state === 'hit') ctx.fillStyle = '#fff'; 
+        ctx.fillRect(-this.w/2, -this.h/2, this.w, this.h);
+
+        ctx.fillStyle = '#000';
+        ctx.fillRect(this.w/4 - 2, -this.h/4, 5, 5);
+
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 3;
+        if (this.state === 'walk') {
+            let wave = Math.sin(this.animTimer * 0.2) * 10;
+            ctx.beginPath();
+            ctx.moveTo(-5, this.h/2); ctx.lineTo(-5 + wave, this.h/2 + 5); 
+            ctx.moveTo(5, this.h/2); ctx.lineTo(5 - wave, this.h/2 + 5);  
+            ctx.stroke();
+        } else if (this.state === 'attack') {
+            ctx.fillStyle = '#ffcc00';
+            ctx.fillRect(this.w/2, -5, 15, 8); 
+        }
+
+        ctx.restore();
+    }
+}
+
+// ==========================================
+// 5. ゲームコア
+// ==========================================
+const game = {
+    canvas: null,
+    ctx: null,
+    player: null,
+    cpu: null,
+    hitboxes: [],
+    projectiles: [], 
+    particles: [],
+    clouds: [],
+    stocks: { player: 3, cpu: 3 },
+    gameState: 'home', 
+    difficulty: 'normal', 
+    spectatorMode: false, // 観戦モードフラグ
+    menuIndex: 1, 
+    menuOptions: [
+        { id: 'easy', label: '簡単 (EASY)', color: '#2ecc71' },
+        { id: 'normal', label: 'ふつう (NORMAL)', color: '#3498db' },
+        { id: 'hard', label: '難しい (HARD)', color: '#e67e22' },
+        { id: 'lunatic', label: '？？？？？', color: '#9b59b6' }
+    ],
+    timer: 180, 
+    winner: '',
+    hitstopFrames: 0,
+
+    init() {
+        this.canvas = document.getElementById('gameCanvas');
+        this.ctx = this.canvas.getContext('2d');
+        
+        // 通常はプレイヤーとCPU。観戦モード時はplayerインスタンスもisCPU=trueにする
+        this.player = new Character(260, 200, '#3498db', false);
+        this.cpu = new Character(670, 200, '#e74c3c', true);
+
+        for(let i=0; i<5; i++) {
+            this.clouds.push({ x: Math.random()*CANVAS_WIDTH, y: Math.random()*150 + 30, s: Math.random()*0.3 + 0.1, w: Math.random()*80 + 40 });
+        }
+
+        Keys.init();
+        this.loop();
+    },
+
+    handleMenuInput(key) {
+        if (this.gameState === 'home') {
+            if (key === 'w' || key === 'arrowup') {
+                this.menuIndex = (this.menuIndex - 1 + (this.menuOptions.length + 1)) % (this.menuOptions.length + 1);
+                AudioSys.playSelect();
+            }
+            if (key === 's' || key === 'arrowdown') {
+                this.menuIndex = (this.menuIndex + 1) % (this.menuOptions.length + 1);
+                AudioSys.playSelect();
+            }
+            if (key === 'j' || key === 'enter') {
+                if (this.menuIndex < this.menuOptions.length) {
+                    // 通常の難易度選択
+                    this.difficulty = this.menuOptions[this.menuIndex].id;
+                    this.spectatorMode = false;
+                    this.player.isCPU = false; 
+                } else {
+                    // 観戦モード（CPU VS CPU）の処理
+                    // 難易度は現在カーソルが合っているものではなく、現在のデフォルト値（または直前に選ばれていた難易度）を引き継ぐ
+                    this.spectatorMode = true;
+                    this.player.isCPU = true; // 青キャラをAI化
+                }
+                AudioSys.playDecide();
+                this.startBattle();
+            }
+        } else if (this.gameState === 'gameover') {
+            if (key === 'j' || key === 'enter') {
+                AudioSys.playSelect();
+                this.returnToHome();
+            }
+        }
+    },
+
+    returnToHome() {
+        if (this.gameState === 'home') return; 
+        AudioSys.playSelect();
+        this.gameState = 'home';
+        this.hitboxes = [];
+        this.projectiles = [];
+        this.particles = [];
+        this.spectatorMode = false;
+        this.player.isCPU = false;
+        this.player.reset();
+        this.cpu.reset();
+    },
+
+    startBattle() {
+        this.stocks.player = 3;
+        this.stocks.cpu = 3;
+        this.player.reset();
+        this.cpu.reset();
+        this.gameState = 'countdown';
+        this.timer = 180;
+    },
+
+    addHitbox(x, y, w, h, owner) {
+        this.hitboxes.push({ x, y, w, h, owner, life: 3 });
+    },
+
+    addProjectile(x, y, vx, owner) {
+        this.projectiles.push({ x, y, vx, owner, w: 12, h: 12, life: 100 });
+        AudioSys.playShoot();
+    },
+
+    addDust(x, y) {
+        for(let i=0; i<4; i++) {
+            this.particles.push({
+                x, y,
+                vx: (Math.random() - 0.5) * 3,
+                vy: -Math.random() * 2,
+                r: Math.random() * 4 + 2,
+                color: 'rgba(200,200,200,0.5)',
+                life: 15
+            });
+        }
+    },
+
+    addSpark(x, y) {
+        for(let i=0; i<8; i++) {
+            this.particles.push({
+                x, y,
+                vx: (Math.random() - 0.5) * 10,
+                vy: (Math.random() - 0.5) * 10,
+                r: Math.random() * 3 + 2,
+                color: '#ffdd00',
+                life: 10
+            });
+        }
+    },
+
+    triggerKO(char) {
+        AudioSys.playKO();
+        for(let i=0; i<30; i++) {
+            this.particles.push({
+                x: char.x + char.w/2, y: char.y + char.h/2,
+                vx: (Math.random() - 0.5) * 25, vy: (Math.random() - 0.5) * 25,
+                r: Math.random() * 8 + 4, color: char.color, life: 30
+            });
+        }
+
+        if (char === this.cpu) {
+            this.stocks.cpu--;
+            if (this.stocks.cpu <= 0) {
+                this.gameState = 'gameover';
+                this.winner = this.spectatorMode ? 'BLUE CPU' : 'PLAYER';
+                AudioSys.playWin();
+            } else {
+                this.cpu.reset();
+            }
+        } else {
+            this.stocks.player--;
+            if (this.stocks.player <= 0) {
+                this.gameState = 'gameover';
+                this.winner = this.spectatorMode ? 'RED CPU' : 'CPU';
+            } else {
+                this.player.reset();
+            }
+        }
+    },
+
+    update() {
+        if (this.gameState === 'home') {
+            this.clouds.forEach(c => {
+                c.x += c.s;
+                if (c.x > CANVAS_WIDTH) c.x = -c.w;
+            });
+            return;
+        }
+
+        if (this.gameState === 'countdown') {
+            this.timer--;
+            if (this.timer <= 0) this.gameState = 'play';
+            return;
+        }
+
+        if (this.gameState === 'gameover') {
+            return;
+        }
+
+        if (this.hitstopFrames > 0) {
+            this.hitstopFrames--;
+            return;
+        }
+
+        this.player.update();
+        this.cpu.update();
+
+        this.hitboxes.forEach((box, index) => {
+            box.life--;
+            let target = box.owner === this.cpu ? this.player : this.cpu;
+            
+            if (target.hitstun <= 0 && !target.isEvading &&
+                box.x < target.x + target.w && box.x + box.w > target.x &&
+                box.y < target.y + target.h && box.y + box.h > target.y) {
+                
+                AudioSys.playHit();
+                target.percentage += 12; 
+                
+                let kbScale = 3 + (target.percentage * 0.08);
+                let dir = box.owner.facing;
+                
+                target.vx = dir * kbScale;
+                target.vy = -kbScale * 0.7;
+                target.hitstun = Math.floor(kbScale * 2.5);
+                
+                this.hitstopFrames = 5; 
+                this.addSpark(target.x + target.w/2, target.y + target.h/2);
+                box.life = 0; 
+            }
+            if (box.life <= 0) this.hitboxes.splice(index, 1);
+        });
+
+        this.projectiles.forEach((p, index) => {
+            p.x += p.vx;
+            p.life--;
+
+            let target = p.owner === this.cpu ? this.player : this.cpu;
+
+            if (target.hitstun <= 0 && !target.isEvading &&
+                p.x < target.x + target.w && p.x + p.w > target.x &&
+                p.y < target.y + target.h && p.y + p.h > target.y) {
+                
+                AudioSys.playHit();
+                target.percentage += 6; 
+                
+                let kbScale = 2 + (target.percentage * 0.04);
+                let dir = p.vx > 0 ? 1 : -1;
+                
+                target.vx = dir * kbScale;
+                target.vy = -kbScale * 0.4;
+                target.hitstun = Math.floor(kbScale * 2);
+                
+                this.hitstopFrames = 3; 
+                this.addSpark(p.x, p.y);
+                p.life = 0;
+            }
+
+            if (p.life <= 0 || p.x < 0 || p.x > CANVAS_WIDTH) {
+                this.projectiles.splice(index, 1);
+            }
+        });
+
+        this.particles.forEach((p, index) => {
+            p.x += p.vx;
+            p.y += p.vy;
+            p.life--;
+            if (p.life <= 0) this.particles.splice(index, 1);
+        });
+
+        this.clouds.forEach(c => {
+            c.x += c.s;
+            if (c.x > CANVAS_WIDTH) c.x = -c.w;
+        });
+    },
+
+    draw() {
+        this.ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+        let skyGrad = this.ctx.createLinearGradient(0, 0, 0, CANVAS_HEIGHT);
+        skyGrad.addColorStop(0, '#1a2a6c');
+        skyGrad.addColorStop(0.5, '#b21f1f');
+        skyGrad.addColorStop(1, '#fdbb2d');
+        this.ctx.fillStyle = skyGrad;
+        this.ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+        this.ctx.fillStyle = 'rgba(255, 255, 255, 0.25)';
+        this.clouds.forEach(c => {
+            this.ctx.beginPath();
+            this.ctx.arc(c.x, c.y, c.w/2, 0, Math.PI*2);
+            this.ctx.arc(c.x + c.w*0.3, c.y - c.w*0.1, c.w*0.4, 0, Math.PI*2);
+            this.ctx.fill();
+        });
+
+        this.ctx.fillStyle = '#6d214f';
+        this.ctx.beginPath();
+        this.ctx.moveTo(0, CANVAS_HEIGHT);
+        this.ctx.lineTo(200, 350); this.ctx.lineTo(450, CANVAS_HEIGHT);
+        this.ctx.lineTo(700, 300); this.ctx.lineTo(960, CANVAS_HEIGHT);
+        this.ctx.fill();
+
+        if (this.gameState === 'home') {
+            this.drawHomeMenu();
+            return;
+        }
+
+        this.ctx.fillStyle = STAGE.main.color;
+        this.ctx.fillRect(STAGE.main.x, STAGE.main.y, STAGE.main.w, STAGE.main.h);
+        this.ctx.fillStyle = STAGE.main.topColor;
+        this.ctx.fillRect(STAGE.main.x, STAGE.main.y, STAGE.main.w, 8);
+
+        STAGE.platforms.forEach(plat => {
+            this.ctx.fillStyle = plat.color;
+            this.ctx.fillRect(plat.x, plat.y, plat.w, plat.h);
+            this.ctx.fillStyle = '#a2b9bc';
+            this.ctx.fillRect(plat.x, plat.y, plat.w, 2);
+        });
+
+        if (this.gameState !== 'gameover') {
+            this.player.draw(this.ctx);
+            this.cpu.draw(this.ctx);
+        }
+
+        this.projectiles.forEach(p => {
+            this.ctx.save();
+            this.ctx.fillStyle = p.owner === this.cpu ? '#ff4d4d' : '#00ffff';
+            this.ctx.shadowBlur = 12;
+            this.ctx.shadowColor = this.ctx.fillStyle;
+            this.ctx.beginPath();
+            this.ctx.arc(p.x + p.w/2, p.y + p.h/2, p.w/2, 0, Math.PI*2);
+            this.ctx.fill();
+            this.ctx.restore();
+        });
+
+        [this.player, this.cpu].forEach(char => {
+            if (char.hitstun > 10) {
+                this.ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+                this.ctx.lineWidth = 4;
+                this.ctx.beginPath();
+                this.ctx.moveTo(char.x + char.w/2, char.y + char.h/2);
+                this.ctx.lineTo(char.x + char.w/2 - char.vx*3, char.y + char.h/2 - char.vy*3);
+                this.ctx.stroke();
+            }
+        });
+
+        this.particles.forEach(p => {
+            this.ctx.fillStyle = p.color;
+            this.ctx.beginPath();
+            this.ctx.arc(p.x, p.y, p.r, 0, Math.PI*2);
+            this.ctx.fill();
+        });
+
+        this.drawUI();
+    },
+
+    drawHomeMenu() {
+        this.ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+        this.ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+        this.ctx.textAlign = 'center';
+        this.ctx.fillStyle = '#fff';
+        this.ctx.font = 'bold 54px sans-serif';
+        this.ctx.shadowColor = '#000';
+        this.ctx.shadowBlur = 10;
+        this.ctx.fillText('PLATFORM FIGHTER', CANVAS_WIDTH / 2, 110);
+        this.ctx.shadowBlur = 0;
+
+        this.ctx.font = '20px sans-serif';
+        this.ctx.fillStyle = '#ffcc00';
+        this.ctx.fillText('難易度またはゲームモードを選んでバトル開始！', CANVAS_WIDTH / 2, 165);
+
+        let startY = 220;
+        // 難易度4項目 + CPUバトルの全5項目をループ描画
+        const totalItems = this.menuOptions.length + 1;
+
+        for (let idx = 0; idx < totalItems; idx++) {
+            let isSelected = (idx === this.menuIndex);
+            let itemY = startY + (idx * 45);
+
+            if (isSelected) {
+                this.ctx.fillStyle = 'rgba(255, 255, 255, 0.2)';
+                this.ctx.fillRect(CANVAS_WIDTH / 2 - 180, itemY - 26, 360, 36);
+
+                this.ctx.fillStyle = '#ffcc00';
+                this.ctx.font = 'bold 20px sans-serif';
+                this.ctx.fillText('▶', CANVAS_WIDTH / 2 - 150, itemY - 2);
+            }
+
+            this.ctx.font = isSelected ? 'bold 22px sans-serif' : '18px sans-serif';
+
+            if (idx < this.menuOptions.length) {
+                // 難易度リスト
+                let opt = this.menuOptions[idx];
+                if (opt.id === 'lunatic') {
+                    this.ctx.fillStyle = isSelected ? '#ff3333' : '#aa77cc';
+                } else {
+                    this.ctx.fillStyle = isSelected ? '#fff' : '#ccc';
+                }
+                // 現在設定中の難易度には目印をつける
+                let activeMark = (opt.id === this.difficulty) ? ' (設定中)' : '';
+                this.ctx.fillText(opt.label + activeMark, CANVAS_WIDTH / 2, itemY);
+            } else {
+                // CPUバトル（観戦）
+                this.ctx.fillStyle = isSelected ? '#39ff14' : '#2ecc71';
+                // 難易度の強さ表示
+                let curLabel = this.menuOptions.find(o => o.id === this.difficulty).label;
+                this.ctx.fillText(`💻 CPUバトル (観戦)  [強さ: ${curLabel}]`, CANVAS_WIDTH / 2, itemY);
+            }
+        }
+
+        this.ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
+        this.ctx.font = '14px sans-serif';
+        this.ctx.fillText('【選択】 W : 上へ移動 / S : 下へ移動      【決定】 J キー', CANVAS_WIDTH / 2, CANVAS_HEIGHT - 35);
+    },
+
+    drawUI() {
+        this.ctx.textAlign = 'center';
+        this.ctx.font = 'bold 32px sans-serif';
+        this.ctx.fillStyle = '#fff';
+        this.ctx.fillText(`${this.player.percentage}%`, CANVAS_WIDTH * 0.3, CANVAS_HEIGHT - 50);
+        this.ctx.font = '16px sans-serif';
+        
+        // 観戦モードならプレイヤーを「BLUE CPU」と表示
+        let blueLabel = this.spectatorMode ? 'BLUE CPU' : 'PLAYER';
+        this.ctx.fillText(`${blueLabel} ` + '●'.repeat(this.stocks.player), CANVAS_WIDTH * 0.3, CANVAS_HEIGHT - 25);
+
+        this.ctx.font = 'bold 32px sans-serif';
+        this.ctx.fillText(`${this.cpu.percentage}%`, CANVAS_WIDTH * 0.7, CANVAS_HEIGHT - 50);
+        this.ctx.font = '16px sans-serif';
+        let redLabel = this.spectatorMode ? 'RED CPU' : 'CPU';
+        this.ctx.fillText(`${redLabel} ` + '●'.repeat(this.stocks.cpu), CANVAS_WIDTH * 0.7, CANVAS_HEIGHT - 25);
+
+        let currentDiffLabel = this.menuOptions.find(o => o.id === this.difficulty).label;
+        this.ctx.fillStyle = '#ffcc00';
+        this.ctx.font = 'bold 14px sans-serif';
+        this.ctx.fillText(`難易度: ${currentDiffLabel}`, CANVAS_WIDTH / 2, 50);
+
+        this.ctx.fillStyle = 'rgba(255,255,255,0.6)';
+        this.ctx.font = '14px sans-serif';
+        if (this.spectatorMode) {
+            this.ctx.fillText('【観戦モード中】 Esc: ホームへ戻る', CANVAS_WIDTH/2, 25);
+        } else {
+            this.ctx.fillText('WASD: 移動・ジャンプ | J: 通常攻撃 | K: 飛び道具 | L: 回避 | Shift: ダッシュ | Esc: ホームへ戻る', CANVAS_WIDTH/2, 25);
+        }
+
+        if (this.gameState === 'countdown') {
+            this.ctx.fillStyle = 'rgba(0,0,0,0.4)';
+            this.ctx.fillRect(0,0,CANVAS_WIDTH,CANVAS_HEIGHT);
+            this.ctx.fillStyle = '#fff';
+            this.ctx.font = 'bold 72px sans-serif';
+            let count = Math.ceil(this.timer / 60);
+            this.ctx.fillText(count > 0 ? count : 'READY', CANVAS_WIDTH/2, CANVAS_HEIGHT/2);
+        }
+
+        if (this.gameState === 'gameover') {
+            this.ctx.fillStyle = 'rgba(0,0,0,0.7)';
+            this.ctx.fillRect(0,0,CANVAS_WIDTH,CANVAS_HEIGHT);
+            this.ctx.fillStyle = '#ffcc00';
+            this.ctx.font = 'bold 64px sans-serif';
+            this.ctx.fillText(`${this.winner} WIN!`, CANVAS_WIDTH/2, CANVAS_HEIGHT/2 - 20);
+            this.ctx.fillStyle = '#fff';
+            this.ctx.font = '20px sans-serif';
+            this.ctx.fillText('J キーを押すか、Esc キーでホーム画面へ戻る', CANVAS_WIDTH/2, CANVAS_HEIGHT/2 + 40);
+        }
+    },
+
+    loop() {
+        this.update();
+        this.draw();
+        requestAnimationFrame(() => this.loop());
+    }
+};
+
+window.onload = () => {
+    game.init();
+};
+</script>
+
+</body>
+</html>
