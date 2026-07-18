@@ -625,7 +625,7 @@ const game = {
         this.player.reset();
         this.cpu.reset();
         this.gameState = 'countdown';
-        this.timer = 180;
+        this.timer = 180; // 3秒間カウントダウン (60fps * 3)
     },
 
     addHitbox(x, y, w, h, owner) {
@@ -936,82 +936,102 @@ const game = {
             }
         }
 
-        this.ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
+        // 操作説明を下に表示
+        this.ctx.fillStyle = '#aaa';
         this.ctx.font = '14px sans-serif';
-        if (this.menuIndex === this.menuOptions.length) {
-            this.ctx.fillText('【選択】 W/S : 移動   A/D : 青/赤CPU選択   Q/E または A/D : 強さ変更   【決定】 J キー', CANVAS_WIDTH / 2, CANVAS_HEIGHT - 35);
-        } else {
-            this.ctx.fillText('【選択】 W : 上へ移動 / S : 下へ移動      【決定】 J キー', CANVAS_WIDTH / 2, CANVAS_HEIGHT - 35);
-        }
+        this.ctx.fillText('操作: [W][S] / [↑][↓] 選択  |  [J] / [Enter] 決定  |  観戦時[A][D]で青赤選択、[Q][E]で難易度変更', CANVAS_WIDTH / 2, CANVAS_HEIGHT - 45);
+        this.ctx.fillText('対戦中操作: [A][D] 左右移動  |  [W] ジャンプ  |  [SHIFT] ダッシュ  |  [J] 近接攻撃  |  [K] 遠距離ショット  |  [Esc] メニューに戻る', CANVAS_WIDTH / 2, CANVAS_HEIGHT - 20);
     },
 
     drawUI() {
         this.ctx.textAlign = 'center';
-        this.ctx.font = 'bold 32px sans-serif';
-        this.ctx.fillStyle = '#fff';
-        this.ctx.fillText(`${this.player.percentage}%`, CANVAS_WIDTH * 0.3, CANVAS_HEIGHT - 50);
-        this.ctx.font = '16px sans-serif';
-        
-        let blueLabel = this.spectatorMode ? 'BLUE CPU' : 'PLAYER';
-        this.ctx.fillText(`${blueLabel} ` + '●'.repeat(this.stocks.player), CANVAS_WIDTH * 0.3, CANVAS_HEIGHT - 25);
 
-        this.ctx.font = 'bold 32px sans-serif';
-        this.ctx.fillText(`${this.cpu.percentage}%`, CANVAS_WIDTH * 0.7, CANVAS_HEIGHT - 50);
-        this.ctx.font = '16px sans-serif';
-        let redLabel = this.spectatorMode ? 'RED CPU' : 'CPU';
-        this.ctx.fillText(`${redLabel} ` + '●'.repeat(this.stocks.cpu), CANVAS_WIDTH * 0.7, CANVAS_HEIGHT - 25);
-
-        this.ctx.fillStyle = '#ffcc00';
-        this.ctx.font = 'bold 14px sans-serif';
-        if (this.spectatorMode) {
-            let bLabel = this.menuOptions.find(o => o.id === this.difficultyBlue).label;
-            let rLabel = this.menuOptions.find(o => o.id === this.difficultyRed).label;
-            this.ctx.fillText(`観戦中 - 青: ${bLabel}  VS  赤: ${rLabel}`, CANVAS_WIDTH / 2, 50);
-        } else {
-            let currentDiffLabel = this.menuOptions.find(o => o.id === this.difficulty).label;
-            this.ctx.fillText(`難易度: ${currentDiffLabel}`, CANVAS_WIDTH / 2, 50);
+        // 1. カウントダウン描画
+        if (this.gameState === 'countdown') {
+            let seconds = Math.ceil(this.timer / 60);
+            this.ctx.fillStyle = '#ffcc00';
+            this.ctx.font = 'bold 72px sans-serif';
+            this.ctx.fillText(seconds, CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2);
+            return;
         }
 
-        this.ctx.fillStyle = 'rgba(255,255,255,0.6)';
+        // 2. プレイ・ゲームオーバー中のHUD描画
+        // パーセンテージ表示
+        this.ctx.font = 'bold 36px sans-serif';
+        this.ctx.fillStyle = '#3498db';
+        this.ctx.fillText(`${this.player.percentage}%`, 250, 480);
+        this.ctx.font = '14px sans-serif';
+        this.ctx.fillStyle = '#fff';
+        this.ctx.fillText(this.spectatorMode ? 'BLUE CPU' : 'PLAYER', 250, 505);
+
+        this.ctx.font = 'bold 36px sans-serif';
+        this.ctx.fillStyle = '#e74c3c';
+        this.ctx.fillText(`${this.cpu.percentage}%`, 710, 480);
+        this.ctx.font = '14px sans-serif';
+        this.ctx.fillStyle = '#fff';
+        this.ctx.fillText(this.spectatorMode ? 'RED CPU' : 'CPU', 710, 505);
+
+        // ストック (残機) ライフ描画
+        this.ctx.fillStyle = '#3498db';
+        for(let i=0; i<this.stocks.player; i++) {
+            this.ctx.fillRect(190 + (i * 20), 515, 12, 12);
+        }
+
+        this.ctx.fillStyle = '#e74c3c';
+        for(let i=0; i<this.stocks.cpu; i++) {
+            this.ctx.fillRect(690 + (i * 20), 515, 12, 12);
+        }
+
+        // 難易度・モード情報表示
+        this.ctx.fillStyle = '#aaa';
         this.ctx.font = '14px sans-serif';
         if (this.spectatorMode) {
-            this.ctx.fillText('【観戦モード中】 Esc: ホームへ戻る', CANVAS_WIDTH/2, 25);
+            let blueName = this.menuOptions.find(o => o.id === this.difficultyBlue).label;
+            let redName = this.menuOptions.find(o => o.id === this.difficultyRed).label;
+            this.ctx.fillText(`観戦モード: 青(${blueName}) vs 赤(${redName})`, CANVAS_WIDTH / 2, 30);
         } else {
-            this.ctx.fillText('WASD: 移動・ジャンプ | J: 通常攻撃 | K: 飛び道具 | Shift: ダッシュ | Esc: ホームへ戻る', CANVAS_WIDTH/2, 25);
+            let diffName = this.menuOptions.find(o => o.id === this.difficulty).label;
+            this.ctx.fillText(`難易度: ${diffName}`, CANVAS_WIDTH / 2, 30);
         }
 
-        if (this.gameState === 'countdown') {
-            this.ctx.fillStyle = 'rgba(0,0,0,0.4)';
-            this.ctx.fillRect(0,0,CANVAS_WIDTH,CANVAS_HEIGHT);
-            this.ctx.fillStyle = '#fff';
-            this.ctx.font = 'bold 72px sans-serif';
-            let count = Math.ceil(this.timer / 60);
-            this.ctx.fillText(count > 0 ? count : 'READY', CANVAS_WIDTH/2, CANVAS_HEIGHT/2);
-        }
-
+        // 3. ゲームオーバー表示
         if (this.gameState === 'gameover') {
-            this.ctx.fillStyle = 'rgba(0,0,0,0.7)';
-            this.ctx.fillRect(0,0,CANVAS_WIDTH,CANVAS_HEIGHT);
+            this.ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+            this.ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
             this.ctx.fillStyle = '#ffcc00';
             this.ctx.font = 'bold 64px sans-serif';
-            this.ctx.fillText(`${this.winner} WIN!`, CANVAS_WIDTH/2, CANVAS_HEIGHT/2 - 20);
+            this.ctx.fillText('GAME SET', CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 - 40);
+
             this.ctx.fillStyle = '#fff';
-            this.ctx.font = '20px sans-serif';
-            this.ctx.fillText('J キーを押すか、Esc キーでホーム画面へ戻る', CANVAS_WIDTH/2, CANVAS_HEIGHT/2 + 40);
+            this.ctx.font = '32px sans-serif';
+            this.ctx.fillText(`${this.winner} WIN!`, CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 + 20);
+
+            this.ctx.font = '18px sans-serif';
+            this.ctx.fillStyle = '#ccc';
+            this.ctx.fillText('[J]キー または [Enter]キー でメニューに戻る', CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 + 80);
         }
     },
 
+    // メインループ
     loop() {
-        this.update();
-        this.draw();
-        requestAnimationFrame(() => this.loop());
+        game.update();
+        game.draw();
+        requestAnimationFrame(() => game.loop());
     }
 };
 
+// ==========================================
+// 6. 起動処理
+// ==========================================
 window.onload = () => {
     game.init();
+    
+    // Canvasクリック時にオーディオコンテキストを初期化可能に
+    document.getElementById('gameCanvas').addEventListener('click', () => {
+        AudioSys.init();
+    });
 };
 </script>
-
 </body>
 </html>
